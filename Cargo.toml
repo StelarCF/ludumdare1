@@ -1,0 +1,14 @@
+[package]
+name = "ludumdare1"
+version = "0.1.0"
+authors = ["StelarCF <stelarcf@gmail.com>"]
+
+[dependencies]
+piston_window = "0.32.0"
+find_folder = "*"
+gfx_device_gl = "0.7.0"
+gfx = "0.8.1"
+piston2d-gfx_graphics = "0.16.0"
+nalgebra = "*"
+ncollide = "*"
+conrod = "*"
