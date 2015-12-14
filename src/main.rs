@@ -6,12 +6,10 @@ extern crate gfx;
 extern crate nalgebra;
 extern crate ncollide;
 extern crate rand;
+extern crate rodio;
 #[macro_use] extern crate conrod;
 
 use piston_window::*;
-use gfx_device_gl::{Resources, Output, CommandBuffer};
-use gfx_graphics::GfxGraphics;
-use std::f64::consts::PI;
 use nalgebra::Vec1 as Vector1;
 use nalgebra::Vec2 as Vector2;
 use nalgebra::Rot2 as Rotate2;
@@ -21,9 +19,15 @@ use nalgebra::Norm;
 use rand::Rng;
 use rand::StdRng;
 
+use rodio::Source;
+use std::time::Duration;
+
 use std::str::FromStr;
 
+use std::io::BufReader;
+
 use conrod::{Theme, Widget};
+use conrod::color::Color;
 
 pub type Vec1 = Vector1<f64>;
 pub type Vec2 = Vector2<f64>;
@@ -115,7 +119,40 @@ impl Circle {
 struct Triangle {
     x: f64, y: f64,
     radius: f64,
-    colour: usize
+    colour: usize,
+    lifetime: f64,
+    to_delete: bool
+}
+
+impl Triangle {
+    fn new(rng: &mut StdRng, px: f64, py: f64) -> Triangle {
+        Triangle {
+            x: px,
+            y: py,
+            lifetime: 30.0,
+            radius: 20.0,
+            to_delete: false,
+            colour: rng.gen::<usize>() % 6
+        }
+    }
+    fn new_rand(rng: &mut StdRng, bx: f64, by: f64) -> Triangle {
+        let x: f64 = rng.gen::<f64>() * bx - bx / 2.0;
+        let y: f64 = rng.gen::<f64>() * by - by / 2.0;
+        Triangle {
+            x: x,
+            y: y,
+            lifetime: 30.0,
+            radius: 20.0,
+            to_delete: false,
+            colour: rng.gen::<usize>() % 6
+        }
+    }
+    fn update(&mut self, dt: f64) {
+        self.lifetime -= dt;
+        if(self.lifetime < 0.0) {
+            self.to_delete = true;
+        }
+    }
 }
 
 struct Game {
@@ -123,27 +160,53 @@ struct Game {
     game_state: GameState,
     time_elapsed: f64,
     grown: i64,
-    pub colours: Vec<conrod::color::Color>,
+    pub colours: Vec<Color>,
     scx: f64, scy: f64,
     mx: f64, my: f64,
     player: Player,
     circles: Vec<Circle>,
-    triangles: Vec<Triangle>
+    triangles: Vec<Triangle>,
+    next_place_triangle: f64,
+    tris: i64,
+    col_left: Option<usize>,
+    col_right: Option<usize>,
+    score: f64
 }
 
 impl Game {
     fn new() -> Game {
-        Game { is_paused: false, game_state: GameState::Game, time_elapsed: 0.0, grown: 0, colours: Vec::new(), circles: Vec::new(), triangles: Vec::new(), mx: 0.0, my: 0.0, scx: 300.0, scy: 300.0, player: Player::new()}
+        Game { is_paused: false, game_state: GameState::Game, time_elapsed: 0.0, grown: 0, colours: Vec::new(), circles: Vec::new(), triangles: Vec::new(), mx: 0.0, my: 0.0, scx: 300.0, scy: 300.0, player: Player::new(),
+        next_place_triangle: 10.0, tris: 0, col_left: None, col_right: None, score: 0.0}
     }
     fn init(&mut self) {
         self.circles.clear();
         self.triangles.clear();
     }
     fn on_update(&mut self, upd: UpdateArgs, ui: &mut Ui, rng: &mut StdRng) {
-        self.time_elapsed += upd.dt;
         match self.game_state {
             GameState::Game => {
                 if !self.is_paused {
+                    self.time_elapsed += upd.dt;
+                    if self.player.radius > 200.0 {
+                        self.player.radius = 200.0;
+                    }
+                    if self.player.radius > 40.0 {
+                        println!("{}", self.player.radius);
+                        self.player.radius -= upd.dt * (self.player.radius - 40.0) * (self.player.radius - 40.0) / 1000.0;
+                        println!("{}", self.player.radius);
+                    }
+                    if self.next_place_triangle < 0.0 {
+                        if self.tris == 0 {
+                            self.triangles.push(Triangle::new(rng, 60.0, 60.0));
+                            self.tris += 1;
+                        } else {
+                            self.triangles.push(Triangle::new_rand(rng, self.scx * 2.0, self.scy * 2.0));
+                            self.tris += 1;
+                        }
+                        self.next_place_triangle = 10.0;
+                    } else {
+                        self.next_place_triangle -= upd.dt;
+                    }
                     if rng.gen::<f64>() < 0.015 + self.time_elapsed.sqrt() / 10000.0 + (self.grown as f64) / 8000.0 && self.circles.len() < (self.time_elapsed.sqrt() * 3.0 + (self.grown as f64).sqrt() * 5.0) as usize {
                         self.circles.push(Circle::new_rand(rng));
                     }
@@ -171,7 +234,17 @@ impl Game {
                                 self.player.colour_state = c.inside_colour;
                                 c.to_delete = true;
                             } else {
-                                self.game_state = GameState::End;
+                                if self.col_left == None && self.col_right == None {
+                                    self.game_state = GameState::End;
+                                } else if self.col_right == None {
+                                    println!("Removing left");
+                                    self.col_left = None;
+                                    c.to_delete = true;
+                                } else {
+                                    println!("Removing right");
+                                    self.col_right = None;
+                                    c.to_delete = true;
+                                }
                             }
                         } else {
                             if c.x > 1200.0 || c.x < -1200.0 || c.y > 1200.0 || c.y < -1200.0 {
@@ -180,6 +253,24 @@ impl Game {
                         }
                     }
                     self.circles = self.circles.iter().cloned().filter(|x| x.to_delete == false).collect();
+                    for ref mut t in &mut self.triangles {
+                        t.update(upd.dt);
+                        let p = Vec2::new(self.player.x, self.player.y);
+                        let f = Vec2::new(t.x, t.y);
+                        let delta = f - p;
+                        if delta.norm() * 2.0 < self.player.radius + t.radius {
+                            if self.col_left == None {
+                                self.col_left = Some(t.colour);
+                                t.to_delete = true;
+                                println!("Got left");
+                            } else if self.col_right == None {
+                                self.col_right = Some(t.colour);
+                                t.to_delete = true;
+                                println!("Got right");
+                            }
+                        }
+                    }
+                    self.triangles = self.triangles.iter().cloned().filter(|x| x.to_delete == false).collect();
                 }
             }
             _ => {}
@@ -201,7 +292,7 @@ impl Game {
 
             // Our `Canvas` tree, upon which we will place our text widgets.
 
-            let mut time = String::from_str("Elapsed Time: ").unwrap();
+            let mut time = String::from_str("Time Alive: ").unwrap();
             let a = (self.time_elapsed).to_string();
             let (a, b) = a.split_at(a.find('.').unwrap_or(a.len()));
             time = time + a + "." + &b[1..2];
@@ -224,7 +315,7 @@ impl Game {
             .set(TEXT2, ui);
 
             let point1 = "Point your mouse where you want to move";
-            let point2 = "Collect triangles to gain powerups\nYou can use them to change your color instantly by pressing the mouse buttons!";
+            let point2 = "Collect triangles to gain powerups\nYou can use them to change your color instantly by pressing the mouse buttons!\nThey can also act as shields";
             if self.time_elapsed < 10.0 {
                 Text::new(&point1)
                 .color(color::white())
@@ -237,7 +328,7 @@ impl Game {
                 .color(color::white())
                 .middle()
                 .align_text_middle()
-                .line_spacing(20.0)
+                .line_spacing(10.0)
                 .set(TEXT3, ui);
             }
 
@@ -287,6 +378,37 @@ impl Game {
                             _ => {}
                         }
                     }
+                    Button::Mouse(m) => {
+                        match m {
+                            MouseButton::Left => {
+                                let mut tmp: usize = 0;
+                                match self.col_left {
+                                    Some(col_left) => {
+                                        tmp = self.player.colour_state;
+                                        self.player.colour_state = col_left;
+                                    }
+                                    _ => {}
+                                }
+                                if self.col_left != None {
+                                    self.col_left = Some(tmp);
+                                }
+                            }
+                            MouseButton::Right => {
+                                let mut tmp: usize = 0;
+                                match self.col_right {
+                                    Some(col_right) => {
+                                        tmp = self.player.colour_state;
+                                        self.player.colour_state = col_right;
+                                    }
+                                    _ => {}
+                                }
+                                if self.col_right != None {
+                                    self.col_right = Some(tmp);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -296,7 +418,7 @@ impl Game {
 
     fn draw_game(&mut self, ren: RenderArgs, e: PistonWindow, ui: &mut Ui) {
         e.draw_2d(|c, g| {
-            let conrod::color::Rgba(rr, gg, bb, aa) = conrod::color::hsl(((((self.time_elapsed * 100.0) as i64) % 628) as f32) / 100.0, 0.8, 0.1).to_rgb();
+            let conrod::color::Rgba(rr, gg, bb, aa) = conrod::color::hsl(((((self.time_elapsed * self.time_elapsed / 10.0) as i64) % 628) as f32) / 100.0, 0.8, 0.1).to_rgb();
             clear([rr, gg, bb, aa], g);
             let rekt = [-self.player.radius / 2.0, -self.player.radius / 2.0, self.player.radius, self.player.radius];
             let conrod::color::Rgba(rr, gg, bb, aa) = self.colours[self.player.colour_state].to_rgb();
@@ -308,6 +430,18 @@ impl Game {
                 let rekt = [-cc.radius / 4.0, -cc.radius / 4.0, cc.radius / 2.0, cc.radius / 2.0];
                 let conrod::color::Rgba(rr, gg, bb, aa) = self.colours[cc.inside_colour].to_rgb();
                 ellipse([rr, gg, bb, aa], rekt, c.transform.trans((ren.width / 2) as f64, (ren.height / 2) as f64).trans(cc.x, cc.y), g);
+            }
+            for ref mut tt in &self.triangles {
+                let conrod::color::Rgba(rr, gg, bb, aa) = self.colours[tt.colour].to_rgb();
+                polygon([rr, gg, bb, aa], &[[0.0, -tt.radius / 2.0], [tt.radius / 2.0, tt.radius / 2.0], [-tt.radius / 2.0, tt.radius / 2.0]], c.transform.trans((ren.width / 2) as f64, (ren.height / 2) as f64).trans(tt.x, tt.y), g);
+            }
+            if self.col_left != None {
+                let conrod::color::Rgba(rr, gg, bb, aa) = self.colours[self.col_left.unwrap()].to_rgb();
+                polygon([rr, gg, bb, aa], &[[0.0, -60.0 / 2.0], [60.0 / 2.0, 60.0 / 2.0], [-60.0 / 2.0, 60.0 / 2.0]], c.transform.trans(50.0, 50.0), g);
+            }
+            if self.col_right != None {
+                let conrod::color::Rgba(rr, gg, bb, aa) = self.colours[self.col_right.unwrap()].to_rgb();
+                polygon([rr, gg, bb, aa], &[[0.0, -60.0 / 2.0], [60.0 / 2.0, 60.0 / 2.0], [-60.0 / 2.0, 60.0 / 2.0]], c.transform.trans(ren.width as f64 - 50.0, 50.0), g);
             }
             ui.draw(c, g);
         });
@@ -329,7 +463,7 @@ impl Game {
 fn main() {
     let window: PistonWindow = WindowSettings::new(
         "piston-tutorial",
-        [1080, 720]
+        [1080, 1080]
     )
     .samples(4)
     .exit_on_esc(true)
